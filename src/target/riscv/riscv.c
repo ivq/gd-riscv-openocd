@@ -24,6 +24,7 @@
 #include "rtos/rtos.h"
 #include "debug_defines.h"
 #include <helper/bits.h>
+#include "etrace.h"
 
 #define get_field(reg, mask) (((reg) & (mask)) / ((mask) & ~((mask) << 1)))
 #define set_field(reg, mask, val) (((reg) & ~(mask)) | (((val) * ((mask) & ~((mask) << 1))) & (mask)))
@@ -3201,6 +3202,13 @@ COMMAND_HANDLER(handle_info)
 	return 0;
 }
 
+static const struct command_registration nuclei_command_handlers[] = {
+	{
+		.chain = etrace_command_group_handlers
+	},
+	COMMAND_REGISTRATION_DONE
+};
+
 static const struct command_registration riscv_exec_command_handlers[] = {
 	{
 		.name = "dump_sample_buf",
@@ -3447,6 +3455,13 @@ const struct command_registration riscv_command_handlers[] = {
 		.help = "ARM Command Group",
 		.usage = "",
 		.chain = semihosting_common_handlers
+	},
+	{
+		.name = "nuclei",
+		.mode = COMMAND_ANY,
+		.help = "Nuclei Command Group",
+		.usage = "",
+		.chain = nuclei_command_handlers
 	},
 	COMMAND_REGISTRATION_DONE
 };
