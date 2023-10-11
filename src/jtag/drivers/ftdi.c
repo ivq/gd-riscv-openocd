@@ -128,6 +128,9 @@ static void oscan1_mpsse_clock_tms_cs_out(struct mpsse_ctx *ctx, const uint8_t *
 					  unsigned length, bool tdi, uint8_t mode);
 
 static bool oscan1_mode;
+
+static bool nscan1_mode;
+static int nscan1_ignore_tlr_rst;
 #endif
 
 #define MAX_USB_IDS 8
@@ -279,7 +282,7 @@ static int ftdi_get_signal(const struct signal *s, uint16_t *value_out)
 static void clock_data(struct mpsse_ctx *ctx, const uint8_t *out, unsigned out_offset, uint8_t *in,
 		     unsigned in_offset, unsigned length, uint8_t mode)
 {
-	if (oscan1_mode)
+	if (oscan1_mode || nscan1_mode)
 		oscan1_mpsse_clock_data(ctx, out, out_offset, in, in_offset, length, mode);
 	else
 		mpsse_clock_data(ctx, out, out_offset, in, in_offset, length, mode);
@@ -288,7 +291,7 @@ static void clock_data(struct mpsse_ctx *ctx, const uint8_t *out, unsigned out_o
 static void clock_tms_cs(struct mpsse_ctx *ctx, const uint8_t *out, unsigned out_offset, uint8_t *in,
 		       unsigned in_offset, unsigned length, bool tdi, uint8_t mode)
 {
-	if (oscan1_mode)
+	if (oscan1_mode || nscan1_mode)
 		oscan1_mpsse_clock_tms_cs(ctx, out, out_offset, in, in_offset, length, tdi, mode);
 	else
 		mpsse_clock_tms_cs(ctx, out, out_offset, in, in_offset, length, tdi, mode);
@@ -297,7 +300,7 @@ static void clock_tms_cs(struct mpsse_ctx *ctx, const uint8_t *out, unsigned out
 static void clock_tms_cs_out(struct mpsse_ctx *ctx, const uint8_t *out, unsigned out_offset,
 			   unsigned length, bool tdi, uint8_t mode)
 {
-	if (oscan1_mode)
+	if (oscan1_mode || nscan1_mode)
 		oscan1_mpsse_clock_tms_cs_out(ctx, out, out_offset, length, tdi, mode);
 	else
 		mpsse_clock_tms_cs_out(ctx, out, out_offset, length, tdi, mode);
@@ -677,10 +680,14 @@ static void ftdi_execute_command(struct jtag_command *cmd)
 			ftdi_execute_runtest(cmd);
 			break;
 		case JTAG_TLR_RESET:
-			ftdi_execute_statemove(cmd);
+			for (size_t i = 0; i < 5; i++)
+				ftdi_execute_statemove(cmd);
 #if BUILD_FTDI_OSCAN1 == 1
-			oscan1_reset_online_activate(); /* put the target back into OSCAN1 mode */
+			oscan1_reset_online_activate(); /* put the target (back) into selected cJTAG mode */
+			if (nscan1_ignore_tlr_rst == 1)
+				break;
 #endif
+			ftdi_execute_statemove(cmd);
 			break;
 		case JTAG_PATHMOVE:
 			ftdi_execute_pathmove(cmd);
@@ -760,7 +767,7 @@ static int ftdi_initialize(void)
 		if (sig->data_mask)
 			ftdi_set_signal(sig, '1');
 #if BUILD_FTDI_OSCAN1 == 1
-	} else if (oscan1_mode) {
+	} else if (oscan1_mode || nscan1_mode) {
 		struct signal *sig = find_signal_by_name("JTAG_SEL");
 		if (!sig) {
 			LOG_ERROR("OSCAN1 mode is active but JTAG_SEL signal is not defined");
@@ -861,6 +868,9 @@ static void oscan1_mpsse_clock_tms_cs(struct mpsse_ctx *ctx, const uint8_t *out,
 		bitnum = out_offset + i;
 		tmsbit = ((out[bitnum/8] >> (bitnum%8)) & 0x1);
 
+		if ((nscan1_ignore_tlr_rst == 1) && (i < 3))
+			continue;
+
 		if (tdibit == tmsbit) {
 			/* Can squash into a single MPSSE command */
 			const uint8_t tmsbits = 0x3;
@@ -874,6 +884,7 @@ static void oscan1_mpsse_clock_tms_cs(struct mpsse_ctx *ctx, const uint8_t *out,
 		/* drive another TCK without driving TMSC (TDO cycle) */
 		mpsse_clock_tms_cs(mpsse_ctx, &zero, 0, in, in_offset+i, 1, false, mode);
 	}
+	nscan1_ignore_tlr_rst = 0;
 }
 
 
@@ -1015,8 +1026,7 @@ static void oscan1_reset_online_activate(void)
 	  {'1', '1', '0'},
 	};
 
-
-	if (!oscan1_mode)
+	if (!oscan1_mode && !nscan1_mode)
 		return;
 
 
@@ -1038,6 +1048,61 @@ static void oscan1_reset_online_activate(void)
 	if (!tdo) {
 		LOG_ERROR("Can't run cJTAG online/activate escape sequences: TDO signal is not defined");
 		return;
+	}
+
+	if (nscan1_mode) {
+		nscan1_ignore_tlr_rst = 0;
+		/* Send the sequence to the adapter */
+		uint32_t tms_sequence[] = {
+			0xFFFFFFFF,  3, /* TLR-RST */
+			0x0000001A,  5, /* DR ZBS #1 */
+			0x0000000D,  4, /* DR ZBS #2 */
+			0x00000019,  5, /* CMD2 */
+			0x00000061,  7, /* CP0=3 */
+			0x00001801, 14, /* CP1=9 */
+			0x00000000,  4, /* Check Packet */
+			// Now in cmd level2
+			0x00000010,  32,
+			0x00000120,  13, /* CP0=9 */
+			0x00000010,   9,
+			0x00000012,   9, /* CP1=0 */
+			0x00000010,  12, /* RTI -> SDR */
+		};
+		for (size_t i = 0; i < sizeof(tms_sequence)/sizeof(tms_sequence[0]); i += 2) {
+			uint32_t val = tms_sequence[i];
+			uint32_t cnt = tms_sequence[i + 1];
+			for (size_t j = 0; j < cnt; j++) {
+				oscan1_set_tck_tms_tdi(tck, '0', tms, '1', tdi, val & 0x1 ? '1' : '0');
+				oscan1_set_tck_tms_tdi(tck, '1', tms, '1', tdi, val & 0x1 ? '1' : '0');
+				val >>= 1;
+			}
+		}
+		uint32_t back0 = 0x00;
+		/* CRSCAN=32 */
+		oscan1_mpsse_clock_data(mpsse_ctx, NULL, 0, &back0, 0, 32, ftdi_jtag_mode);
+		uint32_t to_normal_seq[] = {
+			0x00000012,  9, /* SDR -> RTI */
+			0x00000000,  4, /* Check Packet */
+			0x00012090, 21, /* IR ZBS */
+		};
+		for (size_t i = 0; i < sizeof(to_normal_seq)/sizeof(to_normal_seq[0]); i += 2) {
+			uint32_t val = to_normal_seq[i];
+			uint32_t cnt = to_normal_seq[i + 1];
+			for (size_t j = 0; j < cnt; j++) {
+				oscan1_set_tck_tms_tdi(tck, '0', tms, '1', tdi, val & 0x1 ? '1' : '0');
+				oscan1_set_tck_tms_tdi(tck, '1', tms, '1', tdi, val & 0x1 ? '1' : '0');
+				val >>= 1;
+			}
+		}
+		ftdi_get_signal(tdo, &tdovalue);  /* Just to force a flush */
+		if ((back0 & 0xFFFFFFF0) != 0xA0684000) {
+			LOG_INFO("cJTAG timing not satisfied please check constraint or underclocking.");
+		} else if ((back0 & 0xF) != 0x9) {
+			LOG_INFO("This TAP's version is too old, trying use async sequence to handshake.");
+		} else {
+			nscan1_ignore_tlr_rst = 1;
+			return;
+		}
 	}
 
 	/* Send the sequence to the adapter */
@@ -1272,6 +1337,17 @@ COMMAND_HANDLER(ftdi_handle_oscan1_mode_command)
 	command_print(CMD, "oscan1 mode: %s.", oscan1_mode ? "on" : "off");
 	return ERROR_OK;
 }
+COMMAND_HANDLER(ftdi_handle_nscan1_mode_command)
+{
+	if (CMD_ARGC > 1)
+		return ERROR_COMMAND_SYNTAX_ERROR;
+
+	if (CMD_ARGC == 1)
+		COMMAND_PARSE_ON_OFF(CMD_ARGV[0], nscan1_mode);
+
+	command_print(CMD, "nscan1 mode: %s.", nscan1_mode ? "on" : "off");
+	return ERROR_OK;
+}
 #endif
 
 static const struct command_registration ftdi_subcommand_handlers[] = {
@@ -1341,6 +1417,13 @@ static const struct command_registration ftdi_subcommand_handlers[] = {
 		.handler = &ftdi_handle_oscan1_mode_command,
 		.mode = COMMAND_ANY,
 		.help = "set to 'on' to use OSCAN1 mode for signaling, otherwise 'off' (default is 'off')",
+		.usage = "(on|off)",
+	},
+	{
+		.name = "nscan1_mode",
+		.handler = &ftdi_handle_nscan1_mode_command,
+		.mode = COMMAND_ANY,
+		.help = "set to 'on' to use OScan1 mode for signaling, otherwise 'off' (default is 'off')",
 		.usage = "(on|off)",
 	},
 #endif
