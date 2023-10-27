@@ -11392,7 +11392,7 @@ Enable or disable Nuclei CJTAG mode. Usage is the same as @command{ftdi oscan1_m
 @end deffn
 
 @deffn {Command} {flash bank} name driver base size chip_width bus_width target [driver_options]
-Nuclei extends this command with two drivers, nuspi and custom. 
+Nuclei extends this command with two drivers, nuspi and custom.
 Use can refer to the @command{flash bank} command.
 @end deffn
 
