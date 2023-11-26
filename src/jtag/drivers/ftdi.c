@@ -1079,7 +1079,7 @@ static void oscan1_reset_online_activate(void)
 		}
 		uint32_t back0 = 0x00;
 		/* CRSCAN=32 */
-		oscan1_mpsse_clock_data(mpsse_ctx, NULL, 0, &back0, 0, 32, ftdi_jtag_mode);
+		oscan1_mpsse_clock_data(mpsse_ctx, NULL, 0, (uint8_t *)&back0, 0, 32, ftdi_jtag_mode);
 		uint32_t to_normal_seq[] = {
 			0x00000012,  9, /* SDR -> RTI */
 			0x00000000,  4, /* Check Packet */
